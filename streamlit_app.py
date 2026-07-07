@@ -20,6 +20,11 @@ import concurrent.futures
 # --- CONFIGURATION DEFAULTS ---
 DEFAULT_SCREEN_WIDTH = 480
 DEFAULT_SCREEN_HEIGHT = 800
+DEFAULT_DEVICE_PRESET = "Xteink X4 (480x800)"
+DEVICE_PRESETS = {
+    "Xteink X4 (480x800)": (480, 800),
+    "Xteink X3 (528x792)": (528, 792),
+}
 DEFAULT_RENDER_SCALE = 3.0
 DEFAULT_FONT_SIZE = 28
 DEFAULT_MARGIN = 20
@@ -55,6 +60,21 @@ FITZ_FONTS = {
 
 
 # --- UTILITY FUNCTIONS ---
+
+def normalize_device_preset(device_preset):
+    preset_text = str(device_preset or "")
+    if preset_text in DEVICE_PRESETS:
+        return preset_text
+    if "X3" in preset_text.upper():
+        return "Xteink X3 (528x792)"
+    return DEFAULT_DEVICE_PRESET
+
+
+def get_device_dimensions(device_preset, orientation="Portrait"):
+    base_width, base_height = DEVICE_PRESETS[normalize_device_preset(device_preset)]
+    if orientation == "Landscape":
+        return base_height, base_width
+    return base_width, base_height
 
 def fix_css_font_paths(css_text, target_font_family="'CustomFont'"):
     if target_font_family is None:
@@ -247,6 +267,9 @@ class EpubProcessor:
         self.layout_settings = {}
         self.font_data = {}
         self.ui_font_ref = None
+        self.device_preset = DEFAULT_DEVICE_PRESET
+        self.screen_width = DEFAULT_SCREEN_WIDTH
+        self.screen_height = DEFAULT_SCREEN_HEIGHT
 
     def _smart_extract_content(self, elem):
         if elem.name == 'a':
@@ -600,7 +623,7 @@ class EpubProcessor:
 
     def render_chapters(self, selected_indices_set, font_data_input, font_size, margin, line_height, font_weight,
                         bottom_padding, top_padding, text_align, orientation, add_toc, layout_settings=None,
-                        show_footnotes=True):
+                        show_footnotes=True, device_preset=DEFAULT_DEVICE_PRESET):
         is_custom_font = isinstance(font_data_input, dict)
         if is_custom_font:
             self.font_data = font_data_input
@@ -612,10 +635,8 @@ class EpubProcessor:
         self.font_weight, self.bottom_padding, self.top_padding = font_weight, bottom_padding, top_padding
         self.text_align = text_align
         self.layout_settings = layout_settings if layout_settings else {}
-        if orientation == "Landscape":
-            self.screen_width, self.screen_height = DEFAULT_SCREEN_HEIGHT, DEFAULT_SCREEN_WIDTH
-        else:
-            self.screen_width, self.screen_height = DEFAULT_SCREEN_WIDTH, DEFAULT_SCREEN_HEIGHT
+        self.device_preset = normalize_device_preset(device_preset)
+        self.screen_width, self.screen_height = get_device_dimensions(self.device_preset, orientation)
         for doc, _ in self.fitz_docs: doc.close()
         self.fitz_docs, self.page_map = [], []
         font_rules = []
@@ -922,6 +943,7 @@ KEY_MAP = {
     "margin": "margin",
     "line_height": "line_height",
     "font_weight": "font_weight",
+    "device_preset": "device_preset",
     "orientation": "orientation",
     "show_footnotes": "show_footnotes",
     "pos_title": "pos_title",
@@ -1027,8 +1049,16 @@ def main():
                 with st.popover("Export Cover", use_container_width=True):
                     if st.session_state.processor.cover_image_obj:
                         st.write("Cover Settings")
-                        cv_w = st.number_input("Width", value=480)
-                        cv_h = st.number_input("Height", value=800)
+                        cover_sig = (
+                            f"{st.session_state.processor.device_preset}_"
+                            f"{st.session_state.processor.screen_width}x{st.session_state.processor.screen_height}"
+                        )
+                        if st.session_state.get("cover_device_sig") != cover_sig:
+                            st.session_state.cover_width = int(st.session_state.processor.screen_width)
+                            st.session_state.cover_height = int(st.session_state.processor.screen_height)
+                            st.session_state.cover_device_sig = cover_sig
+                        cv_w = st.number_input("Width", key="cover_width")
+                        cv_h = st.number_input("Height", key="cover_height")
                         cv_mode = st.selectbox("Mode", ["Crop to Fill", "Fit", "Stretch"])
                         if st.button("Generate BMP"):
                             img = st.session_state.processor.cover_image_obj.convert("RGB")
@@ -1137,6 +1167,13 @@ def main():
                 current_config['text_blur'] = DEFAULT_TEXT_BLUR
 
         with st.expander("Page Body Layout", expanded=False):
+            device_options = list(DEVICE_PRESETS.keys())
+            current_device = normalize_device_preset(get_state("device_preset", DEFAULT_DEVICE_PRESET))
+            if st.session_state.get("device_preset") != current_device:
+                st.session_state["device_preset"] = current_device
+            current_config['device_preset'] = st.selectbox("Device / Format", device_options,
+                                                           index=device_options.index(current_device),
+                                                           key="device_preset")
             c1, c2 = st.columns(2)
             current_config['orientation'] = c1.selectbox("Orientation", ["Portrait", "Landscape"], key="orientation",
                                                          index=0 if get_state("orientation",
@@ -1144,6 +1181,9 @@ def main():
             align_opts = ["justify", "left"]
             align_idx = 0 if get_state("align", "justify") == "justify" else 1
             current_config['align'] = c2.selectbox("Alignment", align_opts, key="align", index=align_idx)
+            target_w, target_h = get_device_dimensions(current_config['device_preset'],
+                                                       current_config['orientation'])
+            st.caption(f"Target format: XTC, {target_w} x {target_h} px.")
             current_config['use_toc'] = st.checkbox("Generate TOC", value=get_state("use_toc", True), key="use_toc")
             current_config['show_footnotes'] = st.checkbox("Inline Footnotes", value=get_state("show_footnotes", False),
                                                            key="show_footnotes")
@@ -1303,7 +1343,8 @@ def main():
                 current_config['orientation'],
                 current_config['use_toc'],
                 layout_settings=current_config,
-                show_footnotes=current_config['show_footnotes']
+                show_footnotes=current_config['show_footnotes'],
+                device_preset=current_config['device_preset']
             )
             if success:
                 st.session_state.last_config = current_config
