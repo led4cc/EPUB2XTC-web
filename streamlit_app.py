@@ -1117,17 +1117,20 @@ def main():
                             st.session_state.cover_width = int(st.session_state.processor.screen_width)
                             st.session_state.cover_height = int(st.session_state.processor.screen_height)
                             st.session_state.cover_device_sig = cover_sig
-                        cv_w = st.number_input("Width", key="cover_width")
-                        cv_h = st.number_input("Height", key="cover_height")
+                        cv_w = st.number_input("Width", min_value=1, max_value=5000, step=1, key="cover_width")
+                        cv_h = st.number_input("Height", min_value=1, max_value=5000, step=1, key="cover_height")
                         cv_mode = st.selectbox("Mode", ["Crop to Fill", "Fit", "Stretch"])
                         if st.button("Generate BMP"):
-                            img = st.session_state.processor.cover_image_obj.convert("RGB")
+                            cover_size = (max(1, int(cv_w)), max(1, int(cv_h)))
+                            img = ImageOps.exif_transpose(st.session_state.processor.cover_image_obj.copy()).convert("RGB")
                             if cv_mode == "Stretch":
-                                img = img.resize((cv_w, cv_h), Image.Resampling.LANCZOS)
+                                img = img.resize(cover_size, Image.Resampling.LANCZOS)
                             elif cv_mode == "Fit":
-                                img = ImageOps.pad(img, (cv_w, cv_h), color="white", centering=(0.5, 0.5))
+                                img = ImageOps.pad(img, cover_size, method=Image.Resampling.LANCZOS,
+                                                   color="white", centering=(0.5, 0.5))
                             else:
-                                img = ImageOps.fit(img, (cv_w, cv_h), centering=(0.5, 0.5))
+                                img = ImageOps.fit(img, cover_size, method=Image.Resampling.LANCZOS,
+                                                   centering=(0.5, 0.5))
                             img = img.convert("L")
                             img = ImageEnhance.Contrast(img).enhance(1.3)
                             img = ImageEnhance.Brightness(img).enhance(1.05)
