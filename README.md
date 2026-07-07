@@ -8,12 +8,13 @@ A web-based tool designed to convert standard `.epub` files into the `.xtc` bina
 ## Main Features
 
 * **Device Presets:** Supports Xteink X4 (`480x800`) and Xteink X3 (`528x792`) page formats.
+* **Cover Page:** Can insert the EPUB cover as the first XTC page for devices that use page 1 as the book cover.
 * **Smart Hyphenation:** Uses `pyphen` to inject soft hyphens into text nodes, ensuring proper line breaks and justified text flow.
 * **Unlisted Chapters:** Ability to hide specific sections (like Acknowledgments) from the TOC and Progress Bar without deleting them from the book.
 * **Table of Contents Generation:** Automatically creates visual TOC pages at the start of the file.
 * **Visual Progress Bar:** Generates a reading progress bar at the bottom of every page.
 * **Custom Typography:** Supports system fonts and allows uploading custom `.ttf` fonts.
-* **Image Optimization:** Automatically extracts, scales, contrast-enhances, and dithers (Floyd-Steinberg) images embedded in the EPUB.
+* **Image Optimization:** Converts embedded EPUB images to renderer-safe PNG data URIs, then scales, contrast-enhances, and dithers (Floyd-Steinberg) them for e-ink output.
 * **Smart Preview Scaling:** Preview window automatically adapts to Portrait (width-locked) or Landscape (height-locked) orientation.
 
 ## User Manual
@@ -24,6 +25,7 @@ A web-based tool designed to convert standard `.epub` files into the `.xtc` bina
     * *Note:* These chapters are **not deleted**; they remain in the book for reading but will not clutter your navigation.
 3.  **Configure Layout:**
     * **Device:** Choose Xteink X4 (`480x800`) or Xteink X3 (`528x792`).
+    * **Cover:** Keep **Use EPUB cover as first page** enabled if your reader uses page 1 as the book cover.
     * **Font:** Use the default or upload a custom `.ttf` file.
     * **Settings:** Adjust Font Size, Weight, Line Height, Margins, and Padding in the sidebar.
     * **Orientation:** Switch between Portrait and Landscape modes.

@@ -169,13 +169,45 @@ def extract_all_css(book):
     return "\n".join(css_rules)
 
 
+def image_bytes_to_safe_data_uri(image_bytes):
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            img.load()
+            img = ImageOps.exif_transpose(img)
+            if img.mode in ("RGBA", "LA") or "transparency" in img.info:
+                rgba = img.convert("RGBA")
+                background = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+                background.alpha_composite(rgba)
+                img = background.convert("RGB")
+            elif img.mode != "RGB":
+                img = img.convert("RGB")
+
+            out = io.BytesIO()
+            img.save(out, format="PNG", optimize=True)
+            b64_data = base64.b64encode(out.getvalue()).decode('utf-8')
+            return f"data:image/png;base64,{b64_data}"
+    except Exception:
+        return None
+
+
+def normalize_image_key(path):
+    path = unquote(str(path or "")).split("#", 1)[0].split("?", 1)[0]
+    return path.replace("\\", "/").lstrip("./")
+
+
 def extract_images_to_base64(book):
     image_map = {}
     for item in book.get_items_of_type(ebooklib.ITEM_IMAGE):
         try:
-            filename = os.path.basename(item.get_name())
-            b64_data = base64.b64encode(item.get_content()).decode('utf-8')
-            image_map[filename] = f"data:{item.media_type};base64,{b64_data}"
+            item_name = normalize_image_key(item.get_name())
+            filename = os.path.basename(item_name)
+            item_data = item.get_content()
+            data_uri = image_bytes_to_safe_data_uri(item_data)
+            if not data_uri:
+                b64_data = base64.b64encode(item_data).decode('utf-8')
+                data_uri = f"data:{item.media_type};base64,{b64_data}"
+            image_map[item_name] = data_uri
+            image_map[filename] = data_uri
         except:
             pass
     return image_map
@@ -258,6 +290,7 @@ class EpubProcessor:
         self.global_id_map = {}
         self.fitz_docs = []
         self.toc_data_final = []
+        self.cover_pages_images = []
         self.toc_pages_images = []
         self.page_map = []
         self.total_pages = 0
@@ -494,14 +527,19 @@ class EpubProcessor:
         page_num_disp = global_page_index + 1
         percent = int((page_num_disp / self.total_pages) * 100) if self.total_pages > 0 else 0
         current_title = ""
+        num_cover = len(self.cover_pages_images)
         num_toc = len(self.toc_pages_images)
-        if global_page_index < num_toc:
+        if global_page_index < num_cover:
+            current_title = "Cover"
+            chap_page_disp = f"{global_page_index + 1}/{num_cover}"
+        elif global_page_index < num_cover + num_toc:
             current_title = "Table of Contents"
-            chap_page_disp = f"{global_page_index + 1}/{num_toc}"
+            toc_page_idx = global_page_index - num_cover
+            chap_page_disp = f"{toc_page_idx + 1}/{num_toc}"
         else:
             for title, start_pg in reversed(self.toc_data_final):
                 if page_num_disp >= start_pg: current_title = title; break
-            pm_idx = global_page_index - num_toc
+            pm_idx = global_page_index - num_cover - num_toc
             if 0 <= pm_idx < len(self.page_map):
                 doc_idx, page_idx = self.page_map[pm_idx]
                 doc_ref = self.fitz_docs[doc_idx][0]
@@ -623,7 +661,7 @@ class EpubProcessor:
 
     def render_chapters(self, selected_indices_set, font_data_input, font_size, margin, line_height, font_weight,
                         bottom_padding, top_padding, text_align, orientation, add_toc, layout_settings=None,
-                        show_footnotes=True, device_preset=DEFAULT_DEVICE_PRESET):
+                        show_footnotes=True, device_preset=DEFAULT_DEVICE_PRESET, include_cover=True):
         is_custom_font = isinstance(font_data_input, dict)
         if is_custom_font:
             self.font_data = font_data_input
@@ -638,7 +676,7 @@ class EpubProcessor:
         self.device_preset = normalize_device_preset(device_preset)
         self.screen_width, self.screen_height = get_device_dimensions(self.device_preset, orientation)
         for doc, _ in self.fitz_docs: doc.close()
-        self.fitz_docs, self.page_map = [], []
+        self.fitz_docs, self.cover_pages_images, self.page_map = [], [], []
         font_rules = []
         font_family_val = "serif"
         if is_custom_font:
@@ -686,8 +724,12 @@ class EpubProcessor:
             soup = chapter['soup']
             if show_footnotes: soup = self._inject_inline_footnotes(soup, chapter.get('filename', ''))
             for img_tag in soup.find_all('img'):
-                src = os.path.basename(img_tag.get('src', ''))
-                if src in self.book_images: img_tag['src'] = self.book_images[src]
+                src_key = normalize_image_key(img_tag.get('src', ''))
+                src_name = os.path.basename(src_key)
+                if src_key in self.book_images:
+                    img_tag['src'] = self.book_images[src_key]
+                elif src_name in self.book_images:
+                    img_tag['src'] = self.book_images[src_name]
             soup = hyphenate_html_text(soup, self.book_lang)
             if idx in selected_indices_set:
                 temp_chapter_starts.append(running_page_count)
@@ -703,19 +745,24 @@ class EpubProcessor:
             self.fitz_docs.append((doc, chapter['has_image']))
             for i in range(len(doc)): self.page_map.append((len(self.fitz_docs) - 1, i))
             running_page_count += len(doc)
+        if include_cover and self.cover_image_obj:
+            self.cover_pages_images = [self._render_cover_page()]
+        cover_page_count = len(self.cover_pages_images)
+
         if add_toc and final_toc_titles:
             toc_header_space = 100 + self.top_padding
             self.toc_row_height = int(self.font_size * self.line_height * 1.2)
             available_h = self.screen_height - self.bottom_padding - toc_header_space
             self.toc_items_per_page = max(1, int(available_h // self.toc_row_height))
             num_toc_pages = (len(final_toc_titles) + self.toc_items_per_page - 1) // self.toc_items_per_page
-            self.toc_data_final = [(t, temp_chapter_starts[i] + num_toc_pages + 1) for i, t in
+            self.toc_data_final = [(t, temp_chapter_starts[i] + cover_page_count + num_toc_pages + 1) for i, t in
                                    enumerate(final_toc_titles)]
             self.toc_pages_images = self._render_toc_pages(self.toc_data_final)
         else:
-            self.toc_data_final = [(t, temp_chapter_starts[i] + 1) for i, t in enumerate(final_toc_titles)]
+            self.toc_data_final = [(t, temp_chapter_starts[i] + cover_page_count + 1) for i, t in
+                                   enumerate(final_toc_titles)]
             self.toc_pages_images = []
-        self.total_pages = len(self.toc_pages_images) + len(self.page_map)
+        self.total_pages = len(self.cover_pages_images) + len(self.toc_pages_images) + len(self.page_map)
         status_text.empty();
         progress_bar.empty();
         self.is_ready = True
@@ -723,6 +770,11 @@ class EpubProcessor:
 
     def _get_ui_font(self, size):
         return get_pil_font(self.ui_font_ref, int(size))
+
+    def _render_cover_page(self):
+        cover = ImageOps.exif_transpose(self.cover_image_obj.copy()).convert("RGB")
+        return ImageOps.pad(cover, (self.screen_width, self.screen_height),
+                            method=Image.Resampling.LANCZOS, color="white", centering=(0.5, 0.5))
 
     def _render_toc_pages(self, toc_entries):
         pages = []
@@ -775,6 +827,7 @@ class EpubProcessor:
         white_clip = self.layout_settings.get("white_clip", DEFAULT_WHITE_CLIP)
         contrast = self.layout_settings.get("contrast", DEFAULT_CONTRAST)
 
+        num_cover = len(self.cover_pages_images)
         num_toc = len(self.toc_pages_images)
         footer_padding = max(0, self.bottom_padding)
         header_padding = max(0, self.top_padding)
@@ -783,14 +836,20 @@ class EpubProcessor:
 
         # --- 2. PREPARE CONTENT LAYER ---
         has_image_content = False
+        is_cover = False
+        is_toc = False
 
-        if global_page_index < num_toc:
+        if global_page_index < num_cover:
+            img_content = self.cover_pages_images[global_page_index].copy().convert("L")
+            has_image_content = True
+            is_cover = True
+        elif global_page_index < num_cover + num_toc:
             # Table of Contents
-            img_content = self.toc_pages_images[global_page_index].copy().convert("L")
+            toc_idx = global_page_index - num_cover
+            img_content = self.toc_pages_images[toc_idx].copy().convert("L")
             is_toc = True
         else:
-            is_toc = False
-            doc_idx, page_idx = self.page_map[global_page_index - num_toc]
+            doc_idx, page_idx = self.page_map[global_page_index - num_cover - num_toc]
             doc, has_image_content = self.fitz_docs[doc_idx]
             page = doc[page_idx]
 
@@ -810,7 +869,7 @@ class EpubProcessor:
 
         # --- 3. APPLY FILTERS ---
         full_page = Image.new("L", (self.screen_width, self.screen_height), 255)
-        paste_y = 0 if is_toc else header_padding
+        paste_y = 0 if (is_cover or is_toc) else header_padding
 
         # Center horizontally if there's a slight pixel mismatch
         paste_x = (self.screen_width - img_content.width) // 2
@@ -839,7 +898,7 @@ class EpubProcessor:
         img_final = full_page.convert("RGB")
         draw = ImageDraw.Draw(img_final)
 
-        if not is_toc:
+        if not is_cover and not is_toc:
             # Mask out header/footer areas
             if header_padding > 0:
                 draw.rectangle([0, 0, self.screen_width, header_padding], fill=(255, 255, 255))
@@ -933,6 +992,7 @@ KEY_MAP = {
     "bot_pad": "bottom_padding",
     "align": "text_align",
     "use_toc": "generate_toc",
+    "include_cover": "include_cover",
     "pos_perc": "pos_percent",
     "ord_title": "order_title",
     "ord_pagenum": "order_pagenum",
@@ -1184,6 +1244,12 @@ def main():
             target_w, target_h = get_device_dimensions(current_config['device_preset'],
                                                        current_config['orientation'])
             st.caption(f"Target format: XTC, {target_w} x {target_h} px.")
+            has_cover = bool(st.session_state.processor.cover_image_obj)
+            current_config['include_cover'] = st.checkbox("Use EPUB cover as first page",
+                                                          value=get_state("include_cover", True),
+                                                          key="include_cover",
+                                                          disabled=not has_cover,
+                                                          help="Turn this off if the EPUB already contains a cover page in the spine.")
             current_config['use_toc'] = st.checkbox("Generate TOC", value=get_state("use_toc", True), key="use_toc")
             current_config['show_footnotes'] = st.checkbox("Inline Footnotes", value=get_state("show_footnotes", False),
                                                            key="show_footnotes")
@@ -1344,7 +1410,8 @@ def main():
                 current_config['use_toc'],
                 layout_settings=current_config,
                 show_footnotes=current_config['show_footnotes'],
-                device_preset=current_config['device_preset']
+                device_preset=current_config['device_preset'],
+                include_cover=current_config['include_cover']
             )
             if success:
                 st.session_state.last_config = current_config
